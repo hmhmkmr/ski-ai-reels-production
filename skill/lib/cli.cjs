@@ -27,7 +27,7 @@ async function smoke(dir){
   console.log(movie);
 }
 async function main(){
-  if(cmd==='outro'&&args.length===2){console.log(require('./outro.cjs').extract(path.resolve(args[0]),path.resolve(args[1])));return;}
+  if(cmd==='outro'&&(args.length===1||args.length===2)){console.log(require('./outro.cjs').exportOverlay(path.resolve(args.at(-1))));return;}
   if(cmd==='brief'&&args.length===2){require('./brief.cjs').brief(path.resolve(args[0]),path.resolve(args[1]));return;}
   if(cmd==='voice'&&(args.length===2||args.length===3)){await require('./voice.cjs').voice(path.resolve(args[0]),path.resolve(args[1]),args[2]||'ko');return;}
   if(cmd==='media'&&args.length){const r=require('node:child_process').spawnSync(require('./common.cjs').ff,args,{stdio:'inherit',windowsHide:true});if(r.error)throw r.error;if(r.status!==0)throw Error('Media command failed: '+r.status);return;}
@@ -41,7 +41,7 @@ async function main(){
   if(cmd==='init'&&args.length===1){const p=path.resolve(args[0]);if(fs.existsSync(p))throw Error('Choose a new project directory');fs.mkdirSync(path.join(p,'input'),{recursive:true});json(path.join(p,'timeline.json'),timeline());json(path.join(p,'ledger.json'),{episode:'',brief:'',voice:'',references:[],scenes:[],attempts:[],feedback:[],outputs:[]});console.log(p);return;}
   if(cmd==='render'&&args.length===2){console.log(await render(path.resolve(args[0]),path.resolve(args[1])));return;}
   if(cmd==='smoke'&&args.length===1){await smoke(path.resolve(args[0]));return;}
-  if(cmd==='help'){console.log('reels: doctor | brief DECK.pptx NEW_DIR | voice NARRATION NEW_DIR [ko] | media FFMPEG_ARGUMENTS | outro APPROVED_VIDEO NEW_MASTER.mkv | refs [tags] [--limit N] | init NEW_DIR | render TIMELINE_JSON NEW_OUTPUT_DIR | smoke NEW_SAMPLE_DIR');return;}
+  if(cmd==='help'){console.log('reels: doctor | brief DECK.pptx NEW_DIR | voice NARRATION NEW_DIR [ko] | media FFMPEG_ARGUMENTS | outro NEW_OVERLAY.mkv | refs [tags] [--limit N] | init NEW_DIR | render TIMELINE_JSON NEW_OUTPUT_DIR | smoke NEW_SAMPLE_DIR');return;}
   throw Error('Unknown command or missing argument. Use help.');
 }
 main().catch(err=>{console.error(err.message);process.exitCode=1;});

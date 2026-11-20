@@ -76,19 +76,19 @@ function audioTrack(items,dir,t,voice,tmp){
 }
 function stamp(s){const n=Math.round(s*1000),d=(i,w=2)=>String(i).padStart(w,'0');return d(Math.floor(n/3600000))+':'+d(Math.floor(n/60000)%60)+':'+d(Math.floor(n/1000)%60)+','+d(n%1000,3);}
 async function outputMovie(t,tmp,output,dir,ending){
-  const endingFilter='setpts=N/(30*TB),fps='+t.fps+',scale='+t.W+':'+t.H+':force_original_aspect_ratio=decrease:flags=lanczos,pad='+t.W+':'+t.H+':(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,tpad=stop_mode=clone:stop_duration=1,trim=end_frame='+t.outroFrames+',setpts=PTS-STARTPTS';
-  const encode=['-r',String(t.fps),'-fps_mode','cfr','-video_track_timescale',String(t.fps*1000),'-t',fmt(t.length),'-c:v','libx264','-crf','17','-preset','veryfast','-c:a','aac','-b:a','192k','-movflags','+faststart',output];
-  if(!t.bodyFrames){
-    run(['-i',ending,'-i',path.join(tmp,'mix.wav'),'-vf',endingFilter,'-map','0:v:0','-map','1:a:0',...encode]);
-    return;
-  }
-  await gfx.init();const events=t.events.map(e=>({spec:e,sprite:gfx.sprite(e,dir)}));
-  const filter='[0:v]trim=end_frame='+t.bodyFrames+',setpts=PTS-STARTPTS[base];[base][1:v]overlay=0:0:shortest=1:format=auto,format=yuv420p,setsar=1[body];[3:v]'+endingFilter+'[ending];[body][ending]concat=n=2:v=1:a=0[v]';
-  const args=['-hide_banner','-loglevel','error','-i',path.join(tmp,'picture.mp4'),'-f','rawvideo','-pix_fmt','rgba','-s',t.W+'x'+t.H,'-r',String(t.fps),'-i','pipe:0','-i',path.join(tmp,'mix.wav'),'-i',ending,'-filter_complex',filter,'-map','[v]','-map','2:a:0',...encode];
+  await gfx.init();
+  const events=t.events.map(e=>({spec:e,sprite:gfx.sprite(e,dir)}));
+  // The background follows the episode. Hold its last frame only if its supplied footage ends early.
+  const background='[0:v]setsar=1,tpad=stop_mode=clone:stop_duration='+fmt(t.length)+',trim=end_frame='+t.frames+',setpts=PTS-STARTPTS[base]';
+  const graphics='[base][1:v]overlay=shortest=1:format=auto,format=yuv420p[episode]';
+  // Prepend exactly bodyFrames transparent frames so the dim and the original reveal arrive together.
+  const mark='[3:v]setpts=N/(30*TB),fps='+t.fps+',format=rgba,scale='+t.W+':'+t.H+':force_original_aspect_ratio=decrease:flags=lanczos,pad='+t.W+':'+t.H+':(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,tpad=stop_mode=clone:stop_duration=1,trim=end_frame='+t.outroFrames+',tpad=start='+t.bodyFrames+':start_mode=add:color=black@0,setpts=PTS-STARTPTS[mark]';
+  const filter=[background,graphics,mark,'[episode][mark]overlay=shortest=1:format=yuv420,format=yuv420p[v]'].join(';');
+  const args=['-hide_banner','-loglevel','error','-i',path.join(tmp,'picture.mp4'),'-f','rawvideo','-pix_fmt','rgba','-s',t.W+'x'+t.H,'-r',String(t.fps),'-i','pipe:0','-i',path.join(tmp,'mix.wav'),'-i',ending,'-filter_complex',filter,'-map','[v]','-map','2:a:0','-r',String(t.fps),'-fps_mode','cfr','-video_track_timescale',String(t.fps*1000),'-t',fmt(t.length),'-c:v','libx264','-crf','17','-preset','veryfast','-c:a','aac','-b:a','192k','-movflags','+faststart',output];
   const child=cp.spawn(ff,args,{stdio:['pipe','ignore','pipe'],windowsHide:true});let err='';
   child.stderr.on('data',x=>err=(err+x.toString()).slice(-4096));
   const done=new Promise((res,rej)=>{child.once('error',rej);child.once('close',c=>c===0?res():rej(Error('FFmpeg render: '+err+' ('+c+')')));});
-  async function* frames(){for(let i=0;i<t.bodyFrames;i++){const buf=Buffer.alloc(t.W*t.H*4);const time=i/t.fps;for(const e of events)if(time>=e.spec.start&&time<e.spec.end)gfx.draw(buf,t.W,t.H,e,time);yield buf;}}
+  async function* frames(){for(let i=0;i<t.frames;i++){const buf=Buffer.alloc(t.W*t.H*4);const time=i/t.fps;for(const e of events)if(time>=e.spec.start&&time<e.spec.end)gfx.draw(buf,t.W,t.H,e,time);yield buf;}}
   const tasks=await Promise.allSettled([pipeline(Readable.from(frames()),child.stdin),done]);
   if(tasks[1].status==='rejected')throw tasks[1].reason;if(tasks[0].status==='rejected')throw tasks[0].reason;
 }
@@ -99,8 +99,8 @@ async function render(timeline,out){
   const tmp=fs.mkdtempSync(path.join(stage,'.media-'));
   try{
     const edit=path.join(stage,'edit'),voiceParts=path.join(edit,'voice'),fxParts=path.join(tmp,'sfx');[voiceParts,fxParts].forEach(x=>fs.mkdirSync(x,{recursive:true}));
-    const ending=outro.forRender(root,dir,d.endingFile,tmp);
-    if(t.bodyFrames)picture(t,tmp);
+    const ending=outro.forRender();
+    picture(t,tmp);
     const v=audioTrack(t.voices,voiceParts,t,true,tmp),s=audioTrack(t.sfx,fxParts,t,false,tmp);
     run(['-i',v,'-i',s,'-filter_complex','[0:a][1:a]amix=inputs=2:normalize=0,alimiter=limit=0.96:level=false:latency=true[out]','-map','[out]','-t',fmt(t.length),'-c:a','pcm_s24le',path.join(tmp,'mix.wav')]);
     await outputMovie(t,tmp,path.join(stage,'reel.mp4'),dir,ending);
@@ -108,8 +108,8 @@ async function render(timeline,out){
     fs.writeFileSync(path.join(edit,'captions.srt'),srt+'\n','utf8');
     fs.copyFileSync(v,path.join(edit,'voice.wav'));fs.copyFileSync(s,path.join(edit,'effects.wav'));
     const portable={...d,endingAt:t.bodyFrames/t.fps};
-    if(d.endingFile)portable.endingFile=path.relative(path.join(out,'edit'),path.resolve(dir,d.endingFile)).split(path.sep).join('/');
-    else if(!fs.existsSync(path.join(root,'assets','brand','ask-inno-outro.mkv'))&&fs.existsSync(path.join(dir,'input','ask-inno-outro.mkv')))portable.endingFile=path.relative(path.join(out,'edit'),path.join(dir,'input','ask-inno-outro.mkv')).split(path.sep).join('/');
+    // v1.2's flattened reference is no longer used as the last scene.
+    delete portable.endingFile;
     const remap=e=>e.file?{...e,file:path.relative(path.join(out,'edit'),path.resolve(dir,e.file)).split(path.sep).join('/')}:e;
     for(const k of ['scenes','voices','sfx','graphics'])if(Array.isArray(portable[k]))portable[k]=portable[k].map(remap);
     json(path.join(edit,'timeline.json'),portable);
