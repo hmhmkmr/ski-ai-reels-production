@@ -1,6 +1,7 @@
 'use strict';
 const {fs,path,cp,root,ff,run,read,json,file,number}=require('./common.cjs');
 const gfx=require('./graphics.cjs');
+const outro=require('./outro.cjs');
 const {Readable}=require('node:stream');const {pipeline}=require('node:stream/promises');
 const fmt=x=>Number(x).toFixed(6);
 function validate(t,dir){
@@ -14,24 +15,35 @@ function validate(t,dir){
     if(frames<1)throw Error('Scene shorter than one frame');
     return {file:file(path.resolve(dir,s.file)),start,end,frames,dur:frames/fps};
   });
-  const length=last/fps;
-  function audio(a,voice){return (a??[]).map(v=>{
+  const plannedLength=last/fps;
+  const graphics=t.graphics??[];
+  // v1.1 timelines used a terminal transparent ASK Inno logo as their CTA marker.
+  const legacy=graphics.find(e=>e.kind==='logo'&&(!e.file||path.basename(e.file).toLowerCase()==='ask-inno.png')&&Math.abs(e.end-plannedLength)<=1/fps);
+  const at=number(t.endingAt??legacy?.start??plannedLength,'endingAt');
+  const bodyFrames=Math.round(at*fps);
+  if(bodyFrames>last)throw Error('endingAt must fall within the planned scenes');
+  const outroFrames=Math.max(1,Math.round(outro.frames*fps/outro.fps));
+  const frames=bodyFrames+outroFrames, length=frames/fps, bodyEnd=bodyFrames/fps;
+  function audio(a,voice){return (a??[]).flatMap(v=>{
     const from=number(v.from??0,'audio from'),to=number(v.to,'audio to',from+0.00001),at=number(v.at,'audio at');
     const duration=number(v.duration??(to-from),'audio duration',0.00001);
     if(voice&&Math.abs(duration-(to-from))>0.001)throw Error('Keep the provided voice at its natural rate');
-    if(at+duration>length+1/fps)throw Error('Audio ends after the picture');
+    if(voice && at+duration>length+0.5/48000)throw Error('Narration continues after the ASK Inno ending. Trim verified trailing silence or start the CTA earlier by the overrun; keep every spoken syllable.');
+    if(!voice && at>=length)return [];
     if(!Number.isFinite(v.gainDb??0))throw Error('Invalid audio gain');
     return {...v,file:file(path.resolve(dir,v.file)),from,to,at,duration};
   });}
-  const captions=(t.captions??[]).map(e=>({...e,kind:'caption'}));
-  const events=[...(t.graphics??[]),...captions];
-  for(const e of events){
+  const sourceCaptions=(t.captions??[]).map(e=>({...e,kind:'caption'}));
+  const sourceEvents=[...graphics,...sourceCaptions];
+  for(const e of sourceEvents){
     number(e.start,'graphic start');number(e.end,'graphic end',e.start+0.001);
-    if(e.end>length+1/fps)throw Error('Graphic ends after the picture');
+    if(e.end>Math.max(length,plannedLength)+1/fps)throw Error('Graphic ends after the picture');
     for(const k of ['enter','exit'])if(e[k]!=null)number(e[k],k);
     for(const k of ['x','y','toX','toY','rise','alpha'])if(e[k]!=null&&!Number.isFinite(e[k]))throw Error('Invalid '+k);
   }
-  return {fps,W,H,scenes,length,frames:last,captions,events,voices:audio(t.voices,true),sfx:audio(t.sfx,false)};
+  const events=sourceEvents.filter(e=>e!==legacy&&e.start<bodyEnd).map(e=>({...e,end:Math.min(e.end,bodyEnd)}));
+  const captions=events.filter(e=>e.kind==='caption');
+  return {fps,W,H,scenes,length,frames,bodyFrames,outroFrames,captions,events,voices:audio(t.voices,true),sfx:audio(t.sfx,false)};
 }
 function picture(t,tmp){
   const list=[];t.scenes.forEach((s,i)=>{
@@ -57,18 +69,26 @@ function audioTrack(items,dir,t,voice,tmp){
     filters.push('['+(i+1)+':a]volume='+fmt(a.gainDb??0)+'dB,adelay='+Math.round(a.at*48000)+'S:all=1['+tag+']');
     labels.push('['+tag+']');
   });
-  filters.push(labels.join('')+'amix=inputs='+labels.length+':normalize=0:duration=first[mix]');
+  const mix=labels.join('')+'amix=inputs='+labels.length+':normalize=0:duration=first';
+  filters.push(mix+(voice?'':',volume=-12dB')+'[mix]');
   const dest=path.join(tmp,voice?'vo.wav':'fx.wav');
   run([...args,'-filter_complex',filters.join(';'),'-map','[mix]','-t',fmt(t.length),'-c:a','pcm_s24le',dest]);return dest;
 }
 function stamp(s){const n=Math.round(s*1000),d=(i,w=2)=>String(i).padStart(w,'0');return d(Math.floor(n/3600000))+':'+d(Math.floor(n/60000)%60)+':'+d(Math.floor(n/1000)%60)+','+d(n%1000,3);}
-async function outputMovie(t,tmp,output,dir){
+async function outputMovie(t,tmp,output,dir,ending){
+  const endingFilter='setpts=N/(30*TB),fps='+t.fps+',scale='+t.W+':'+t.H+':force_original_aspect_ratio=decrease:flags=lanczos,pad='+t.W+':'+t.H+':(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,tpad=stop_mode=clone:stop_duration=1,trim=end_frame='+t.outroFrames+',setpts=PTS-STARTPTS';
+  const encode=['-r',String(t.fps),'-fps_mode','cfr','-video_track_timescale',String(t.fps*1000),'-t',fmt(t.length),'-c:v','libx264','-crf','17','-preset','veryfast','-c:a','aac','-b:a','192k','-movflags','+faststart',output];
+  if(!t.bodyFrames){
+    run(['-i',ending,'-i',path.join(tmp,'mix.wav'),'-vf',endingFilter,'-map','0:v:0','-map','1:a:0',...encode]);
+    return;
+  }
   await gfx.init();const events=t.events.map(e=>({spec:e,sprite:gfx.sprite(e,dir)}));
-  const args=['-hide_banner','-loglevel','error','-i',path.join(tmp,'picture.mp4'),'-f','rawvideo','-pix_fmt','rgba','-s',t.W+'x'+t.H,'-r',String(t.fps),'-i','pipe:0','-i',path.join(tmp,'mix.wav'),'-filter_complex','[0:v][1:v]overlay=0:0:format=auto,format=yuv420p[v]','-map','[v]','-map','2:a','-frames:v',String(t.frames),'-t',fmt(t.length),'-c:v','libx264','-crf','18','-preset','veryfast','-c:a','aac','-b:a','192k','-movflags','+faststart',output];
+  const filter='[0:v]trim=end_frame='+t.bodyFrames+',setpts=PTS-STARTPTS[base];[base][1:v]overlay=0:0:shortest=1:format=auto,format=yuv420p,setsar=1[body];[3:v]'+endingFilter+'[ending];[body][ending]concat=n=2:v=1:a=0[v]';
+  const args=['-hide_banner','-loglevel','error','-i',path.join(tmp,'picture.mp4'),'-f','rawvideo','-pix_fmt','rgba','-s',t.W+'x'+t.H,'-r',String(t.fps),'-i','pipe:0','-i',path.join(tmp,'mix.wav'),'-i',ending,'-filter_complex',filter,'-map','[v]','-map','2:a:0',...encode];
   const child=cp.spawn(ff,args,{stdio:['pipe','ignore','pipe'],windowsHide:true});let err='';
   child.stderr.on('data',x=>err=(err+x.toString()).slice(-4096));
   const done=new Promise((res,rej)=>{child.once('error',rej);child.once('close',c=>c===0?res():rej(Error('FFmpeg render: '+err+' ('+c+')')));});
-  async function* frames(){for(let i=0;i<t.frames;i++){const buf=Buffer.alloc(t.W*t.H*4);const time=i/t.fps;for(const e of events)if(time>=e.spec.start&&time<e.spec.end)gfx.draw(buf,t.W,t.H,e,time);yield buf;}}
+  async function* frames(){for(let i=0;i<t.bodyFrames;i++){const buf=Buffer.alloc(t.W*t.H*4);const time=i/t.fps;for(const e of events)if(time>=e.spec.start&&time<e.spec.end)gfx.draw(buf,t.W,t.H,e,time);yield buf;}}
   const tasks=await Promise.allSettled([pipeline(Readable.from(frames()),child.stdin),done]);
   if(tasks[1].status==='rejected')throw tasks[1].reason;if(tasks[0].status==='rejected')throw tasks[0].reason;
 }
@@ -79,13 +99,17 @@ async function render(timeline,out){
   const tmp=fs.mkdtempSync(path.join(stage,'.media-'));
   try{
     const edit=path.join(stage,'edit'),voiceParts=path.join(edit,'voice'),fxParts=path.join(tmp,'sfx');[voiceParts,fxParts].forEach(x=>fs.mkdirSync(x,{recursive:true}));
-    picture(t,tmp);const v=audioTrack(t.voices,voiceParts,t,true,tmp),s=audioTrack(t.sfx,fxParts,t,false,tmp);
-    run(['-i',v,'-i',s,'-filter_complex','[0:a]asplit[v][side];[1:a][side]sidechaincompress=threshold=0.04:ratio=6:attack=20:release=230[duck];[v][duck]amix=inputs=2:normalize=0,alimiter=limit=0.96:level=false:latency=true[out]','-map','[out]','-t',fmt(t.length),'-c:a','pcm_s24le',path.join(tmp,'mix.wav')]);
-    await outputMovie(t,tmp,path.join(stage,'reel.mp4'),dir);
+    const ending=outro.forRender(root,dir,d.endingFile,tmp);
+    if(t.bodyFrames)picture(t,tmp);
+    const v=audioTrack(t.voices,voiceParts,t,true,tmp),s=audioTrack(t.sfx,fxParts,t,false,tmp);
+    run(['-i',v,'-i',s,'-filter_complex','[0:a][1:a]amix=inputs=2:normalize=0,alimiter=limit=0.96:level=false:latency=true[out]','-map','[out]','-t',fmt(t.length),'-c:a','pcm_s24le',path.join(tmp,'mix.wav')]);
+    await outputMovie(t,tmp,path.join(stage,'reel.mp4'),dir,ending);
     const srt=t.captions.map((e,i)=>[i+1,stamp(e.start)+' --> '+stamp(e.end),e.lines?e.lines.map(l=>typeof l==='string'?l:l.text).join('\n'):e.text,''].join('\n')).join('\n');
     fs.writeFileSync(path.join(edit,'captions.srt'),srt+'\n','utf8');
     fs.copyFileSync(v,path.join(edit,'voice.wav'));fs.copyFileSync(s,path.join(edit,'effects.wav'));
-    const portable={...d};
+    const portable={...d,endingAt:t.bodyFrames/t.fps};
+    if(d.endingFile)portable.endingFile=path.relative(path.join(out,'edit'),path.resolve(dir,d.endingFile)).split(path.sep).join('/');
+    else if(!fs.existsSync(path.join(root,'assets','brand','ask-inno-outro.mkv'))&&fs.existsSync(path.join(dir,'input','ask-inno-outro.mkv')))portable.endingFile=path.relative(path.join(out,'edit'),path.join(dir,'input','ask-inno-outro.mkv')).split(path.sep).join('/');
     const remap=e=>e.file?{...e,file:path.relative(path.join(out,'edit'),path.resolve(dir,e.file)).split(path.sep).join('/')}:e;
     for(const k of ['scenes','voices','sfx','graphics'])if(Array.isArray(portable[k]))portable[k]=portable[k].map(remap);
     json(path.join(edit,'timeline.json'),portable);
