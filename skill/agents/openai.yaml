@@ -1,0 +1,4 @@
+interface:
+  display_name: "SKI INNO WHY AI 릴스 제작"
+  short_description: "SKI 기획안과 지급 음성을 바탕으로 레퍼런스부터 모션 자막과 엔딩까지 제작"
+  default_prompt: "이 SKI INNO WHY 회차의 기획안과 지급 음성을 바탕으로 $ski-ai-reels-production 스킬로 세로 릴스를 제작해 주세요."

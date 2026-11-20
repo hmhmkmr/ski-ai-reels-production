@@ -1,0 +1,38 @@
+name: Publish Windows skill update
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'New release tag, for example v1.1.1'
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: ski-skill-release
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build cumulative update
+        run: python3 tools/build_release.py "$TAG" --out dist
+      - name: Publish with both assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then echo 'Release already exists'; exit 1; fi
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
+          python3 - "$latest" "$TAG" <<'PY'
+          import sys
+          a,b=(tuple(map(int,v[1:].split('.'))) for v in sys.argv[1:])
+          if b<=a: raise SystemExit('Choose a newer release version')
+          PY
+          gh release create "$TAG" --target "$GITHUB_SHA" --draft --title "$TAG" --generate-notes dist/ski-ai-reels-update.zip dist/ski-ai-reels-update.zip.sha256
+          gh release edit "$TAG" --draft=false --latest
+
